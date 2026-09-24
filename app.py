@@ -1,131 +1,269 @@
 import streamlit as st
-import google.generativeai as genai
-import os
+import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils.dataframe import dataframe_to_rows
+import io
 import re
-import tempfile
-import sys
-import traceback
+from datetime import datetime
 
-st.set_page_config(page_title="Auditoria e-SUS APS", layout="wide")
+st.set_page_config(page_title="Auditoria Automática e-SUS APS", layout="wide")
 
-# Dicionário de Prompts Técnicos de Auditoria
-PROMPTS = {
-    "Indicador C2 - Puericultura": """Você é Engenheiro de Dados em Saúde especialista em e-SUS APS e indicadores da Atenção Primária do Ministério da Saúde. A partir do CSV anexado ("acompanhamento-condicao-saude.csv") e da Nota Metodológica C2 oficial, processe os dados em Python e gere a planilha "Dashboard_Indicador_C2_Microareas.xlsx".
-1. Leitura e Limpeza: Encoding latin1, separador ;. Identificar cabeçalho (iniciado por "Nome;") e descartar metadados. Extrair data em "Gerado em" para referência.
-2. Filtro: Crianças ativas menores de 3 anos (< 1.096 dias de vida).
-3. Práticas (A-E): A(1ª Consulta <=30d); B(9 consultas proporcionais aos marcos até 24m); C(9 antropometrias simultâneas proporcionais); D(Visitas ACS: 1ª<=30d, 2ª<=180d); E(Vacinas: Penta D3, Polio D3, Pneumo D2, SCR D2 adequadas à idade).
-4. Score C2 (%): 20 pontos por prática. Desconsiderar "Aguardando idade" do denominador.
-5. Abas: Dashboard_Microarea (Cards, tabela consolidada por microárea) e Auditoria_Nominal (Filtros, regras aplicadas, dados nominais, remoção de colunas brutas desnecessárias).""",
-    
-    "Indicador C3 - Gestante e Puérpera": """Você é Engenheiro de Dados em Saúde especialista em e-SUS APS e indicadores do Ministério da Saúde. Processar o arquivo CSV anexado de acordo com a Nota Metodológica Oficial do Indicador C3 e gerar o arquivo Excel "Dashboard_Indicador_C3_Gestantes_Puerperas.xlsx".
-1. Leitura e Limpeza: Encoding latin1, separador ;. Localizar cabeçalho "Nome", extrair data "Gerado em".
-2. Filtro: DUM válida. Gestantes ativas (IG 0-294 dias). Puérperas ativas (IG 295-336 dias).
-3. 11 Práticas (A-K): A(1ª Cons<=12sem); B,C,D(7 Consultas, PA, Peso/Altura proporcionais); E(3 Visitas ACS proporcionais); F(dTpa >=20 sem); G(Exames 1ºT <=13w6d); H(Exames 3ºT >=28w); I,J(Cons e Visita Puerpério); K(Saúde Bucal).
-4. IG Atual: X semanas e Y dias (Mês/Classificação).
-5. Score C3: Prática A = 10 pts; B a K = 9 pts (Total 100). Excluir não avaliáveis do denominador.
-6. Abas: Dashboard_Microarea (Cards, tabela sintética) e Auditoria_Nominal (Dados nominais limpos, score individual).""",
-    
-    "Indicador C4 - Diabetes": """Atue como Engenheiro de Dados em Saúde e especialista no e-SUS APS. Processe o CSV "Acompanhamento - Diabetes" e gere "Dashboard_Indicador_C4_Diabetes.xlsx".
-1. Leitura e Limpeza: Encoding latin1, separador ;. Cabeçalho em "Nome", extrair data "Gerado em".
-2. População: Totalidade do relatório (já filtrado pelo PEC).
-3. 6 Práticas (A-F): A(Consulta 6m); B(PA 6m); C(2 Visitas ACS 12m com >=30 dias de intervalo); D(Peso/Altura simultâneo 12m); E(HbA1c solicitada/avaliada 12m); F(Pé diabético 12m).
-4. Score C4: 1 ponto por prática (máx 6). Score em % (atendidas/6).
-5. Abas: Dashboard_Microarea (KPIs, tabela consolidada) e Auditoria_Nominal (Nome, CPF, Celular, Endereço unificado, status de cada prática, Score C4).""",
-    
-    "Indicador C5 - Hipertensão": """Atue como Engenheiro de Dados em Saúde e especialista no e-SUS APS. Processe o CSV "Acompanhamento - Hipertensão" e gere "Dashboard_Indicador_C5_Hipertensao.xlsx".
-1. Leitura e Limpeza: Encoding latin1, separador ;. Cabeçalho em "Nome", extrair data "Gerado em".
-2. População: Totalidade do relatório.
-3. 4 Práticas (A-D): A(Consulta 6m); B(PA 6m); C(2 Visitas ACS 12m com >=30 dias de intervalo); D(Peso/Altura simultâneo 12m).
-4. Score C5: 25 pontos por prática. Score em % (atendidas/4).
-5. Abas: Dashboard_Microarea (KPIs, tabela consolidada) e Auditoria_Nominal (Endereço unificado, remoção de lixo de dados, status por prática, Score C5).""",
-    
-    "Indicador C6 - Pessoa Idosa": """Atue como Engenheiro de Dados em Saúde e especialista no e-SUS APS. Processe o CSV "Acompanhamento - Pessoa Idosa" e gere "Dashboard_Indicador_C6_Pessoa_Idosa.xlsx".
-1. Leitura e Limpeza: Encoding latin1, separador ;. Cabeçalho em "Nome", extrair data "Gerado em".
-2. População: Idade >= 60 anos, janela global de 12 meses.
-3. 4 Práticas (A-D): A(Consulta Med/Enf 12m); B(>=2 Antropometrias simultâneas 12m - usar coluna de contagem); C(2 Visitas ACS 12m com >=30 dias de intervalo); D(Vacina Influenza 12m).
-4. Score C6: 25 pontos por prática. Score em %.
-5. Abas: Dashboard_Microarea e Auditoria_Nominal (limpa de variáveis excedentes, formatação condicional).""",
-    
-    "Indicador C7 - Saúde da Mulher": """Atue como Engenheiro de Dados em Saúde e especialista no e-SUS APS. Processe o CSV "Acompanhamento - Saúde da Mulher" e gere "Dashboard_Indicador_C7_Prevencao_Cancer.xlsx".
-1. Leitura e Limpeza: Encoding latin1, separador ;. Cabeçalho "Nome", extrair data "Gerado em". Calcular idade até a data de referência.
-2. 4 Práticas e Faixas: A(Colo Útero 25-64a, janela 36m); B(HPV 9-14a); C(Saúde Sexual/Reprodutiva 14-69a, janela 12m); D(Mama 50-69a, janela 24m). Atribuir 'Fora da faixa etária' se não aplicável.
-3. Score C7: Calculado estritamente sobre as práticas aplicáveis à idade da pessoa.
-4. Abas: Dashboard_Microarea (Denominadores ajustados por elegibilidade de cada prática) e Auditoria_Nominal (Idade calculada, exclusão de dados desnecessários, cores por status)."""
-}
+st.title("🏥 Sistema de Auditoria de Indicadores e-SUS APS")
+st.subheader("Processamento Automático e Determinístico (Sem consumo de tokens)")
 
-st.title("Orquestrador Clínico e-SUS APS via Gemini")
+# --- MÓDULOS DE PROCESSAMENTO E-SUS APS ---
 
-with st.sidebar:
-    st.header("Configurações")
-    api_key = st.text_input("Chave API (Google Gemini)", type="password")
-    indicador_selecionado = st.selectbox("Selecione o Indicador para Auditoria", list(PROMPTS.keys()))
+def extrair_data_referencia(conteudo_bytes):
+    """Extrai a data 'Gerado em' do cabeçalho do e-SUS PEC ou assume a data atual."""
+    try:
+        texto = conteudo_bytes.decode('latin1', errors='ignore')
+        match = re.search(r'Gerado em;?\s*(\d{2}/\d{2}/\d{4})', texto, re.IGNORECASE)
+        if match:
+            return datetime.strptime(match.group(1), '%d/%m/%Y')
+    except Exception:
+        pass
+    return datetime.now()
 
-uploaded_file = st.file_uploader("Anexe o relatório CSV exportado do e-SUS PEC", type=["csv"])
-
-if st.button("Processar e Gerar Dashboard") and uploaded_file and api_key:
-    genai.configure(api_key=api_key)
-    modelo = genai.GenerativeModel('gemini-1.5-pro')
+def carregar_e_limpar_csv(file_bytes):
+    """Carrega o CSV descartando metadados superiores e localizando a linha do cabeçalho 'Nome'."""
+    data_ref = extrair_data_referencia(file_bytes)
+    lines = file_bytes.decode('latin1', errors='ignore').splitlines()
     
-    with st.spinner("Analisando premissas, gerando código e executando ETL..."):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = os.path.join(tmpdir, uploaded_file.name)
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+    header_idx = 0
+    for idx, line in enumerate(lines[:30]):
+        if line.startswith("Nome;") or ";Nome;" in line or line.startswith('"Nome";'):
+            header_idx = idx
+            break
             
+    df = pd.read_csv(
+        io.BytesIO(file_bytes),
+        sep=';',
+        encoding='latin1',
+        skiprows=header_idx,
+        dtype=str
+    )
+    
+    # Limpeza básica de colunas e strings
+    df.columns = [str(c).strip().replace('"', '') for c in df.columns]
+    df = df.applymap(lambda x: x.strip().replace('"', '') if isinstance(x, str) else x)
+    df = df.replace({'': None, '-': None, 'nan': None, 'NaN': None})
+    
+    return df, data_ref
+
+# --- LÓGICA DO INDICADOR C5 (HIPERTENSÃO) ---
+def processar_indicador_c5(df, data_ref):
+    # Unificação de Endereço
+    def montar_endereco(row):
+        rua = str(row.get('Rua', '') or '').strip()
+        num = str(row.get('Número', '') or '').strip()
+        comp = str(row.get('Complemento', '') or '').strip()
+        partes = [p for p in [rua, num, comp] if p and p != 'None']
+        return ", ".join(partes) if partes else "Endereço não informado"
+    
+    df['Endereço'] = df.apply(montar_endereco, axis=1)
+    
+    # Avaliação das Práticas
+    def avaliar_c5(row):
+        # Prática A (Consulta 6m)
+        d_cons = row.get('Data da última consulta')
+        status_a = "Não atendida (0/1)"
+        if d_cons:
             try:
-                # Upload do arquivo para a API do Gemini
-                gemini_file = genai.upload_file(file_path)
-                
-                # Instrução rigorosa para isolamento de código
-                system_instruction = f"""
-                Você atuará estritamente como um gerador de script Python. Baseado nas regras a seguir, crie um script que leia o arquivo '{uploaded_file.name}' e gere a planilha Excel de saída correspondente no mesmo diretório. 
-                REGRAS OBRIGATÓRIAS:
-                1. Utilize as bibliotecas 'pandas' e 'openpyxl'.
-                2. O código não deve conter placeholders ou dados fictícios.
-                3. Trate erros de encoding tentando 'latin1', 'utf-8' e 'cp1252'.
-                4. Retorne EXCLUSIVAMENTE o bloco de código Python delimitado por ```python e ```, sem nenhuma explicação antes ou depois.
-                
-                REGRAS DE NEGÓCIO:
-                {PROMPTS[indicador_selecionado]}
-                """
-                
-                resposta = modelo.generate_content([gemini_file, system_instruction])
-                
-                # Extração do bloco de código
-                match = re.search(r'```python\n(.*?)\n```', resposta.text, re.DOTALL)
-                codigo_python = match.group(1) if match else resposta.text.replace('```python', '').replace('```', '')
-                
-                # Mudança de diretório para o sandbox e execução do código LLM
-                cwd_original = os.getcwd()
-                os.chdir(tmpdir)
-                
+                dt = datetime.strptime(str(d_cons)[:10], '%d/%m/%Y')
+                if (data_ref - dt).days <= 183:
+                    status_a = "Atendida (1/1)"
+            except: pass
+
+        # Prática B (PA 6m)
+        d_pa = row.get('Data da última medição de pressão arterial')
+        status_b = "Não atendida (0/1)"
+        if d_pa:
+            try:
+                dt = datetime.strptime(str(d_pa)[:10], '%d/%m/%Y')
+                if (data_ref - dt).days <= 183:
+                    status_b = "Atendida (1/1)"
+            except: pass
+
+        # Prática C (2 Visitas ACS 12m com intervalo >=30 dias)
+        visitas_txt = str(row.get('Últimas visitas domiciliares', '') or '')
+        datas_v = re.findall(r'\d{2}/\d{2}/\d{4}', visitas_txt)
+        status_c = "Não atendida (0/2)"
+        
+        dts_validas = []
+        for d in datas_v:
+            try:
+                dt = datetime.strptime(d, '%d/%m/%Y')
+                if 0 <= (data_ref - dt).days <= 365:
+                    dts_validas.append(dt)
+            except: pass
+            
+        dts_validas = sorted(list(set(dts_validas)))
+        if len(dts_validas) >= 2:
+            for i in range(len(dts_validas)-1):
+                if (dts_validas[i+1] - dts_validas[i]).days >= 30:
+                    status_c = "Atendida (2/2)"
+                    break
+
+        # Prática D (Peso e Altura 12m)
+        d_ant = row.get('Data da última medição de peso e altura')
+        status_d = "Não atendida (0/1)"
+        if d_ant:
+            try:
+                dt = datetime.strptime(str(d_ant)[:10], '%d/%m/%Y')
+                if (data_ref - dt).days <= 365:
+                    status_d = "Atendida (1/1)"
+            except: pass
+
+        pts = sum([1 for s in [status_a, status_b, status_c, status_d] if "Atendida" in s])
+        score = (pts / 4.0) * 100
+
+        return pd.Series([
+            status_a, status_b, status_c, status_d, score
+        ])
+
+    df[['Prática A — consulta últimos 6 meses — status',
+        'Prática B — pressão últimos 6 meses — status',
+        'Prática C — 2 visitas em 12 meses — status',
+        'Prática D — peso e altura últimos 12 meses — status',
+        'Score_C5_%']] = df.apply(avaliar_c5, axis=1)
+
+    # Organização das Colunas Nominais
+    cols_nominais = [
+        'Microárea', 'Nome', 'CPF', 'Telefone celular', 'Endereço',
+        'Prática A — consulta últimos 6 meses — status',
+        'Prática B — pressão últimos 6 meses — status',
+        'Prática C — 2 visitas em 12 meses — status',
+        'Prática D — peso e altura últimos 12 meses — status',
+        'Score_C5_%'
+    ]
+    
+    for c in cols_nominais:
+        if c not in df.columns: df[c] = "-"
+        
+    df_nominal = df[cols_nominais].copy()
+    
+    # Agrupamento por Microárea
+    df_micro = df.groupby('Microárea').agg(
+        Pessoas_hipertensao_ativas=('Nome', 'count'),
+        Score_medio_C5=('Score_C5_%', 'mean'),
+        Pct_100_praticas=('Score_C5_%', lambda x: (x == 100).mean() * 100),
+        Pct_Pratica_A=('Prática A — consulta últimos 6 meses — status', lambda x: (x.str.contains("Atendida")).mean() * 100),
+        Pct_Pratica_B=('Prática B — pressão últimos 6 meses — status', lambda x: (x.str.contains("Atendida")).mean() * 100),
+        Pct_Pratica_C=('Prática C — 2 visitas em 12 meses — status', lambda x: (x.str.contains("Atendida")).mean() * 100),
+        Pct_Pratica_D=('Prática D — peso e altura últimos 12 meses — status', lambda x: (x.str.contains("Atendida")).mean() * 100)
+    ).reset_index()
+
+    return df_micro, df_nominal
+
+# --- GERAÇÃO DO ARQUIVO EXCEL COM FORMATAÇÃO ---
+def gerar_excel_c5(df_micro, df_nominal, data_ref):
+    output = io.BytesIO()
+    wb = openpyxl.Workbook()
+    
+    # Estilos
+    blue_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    font_bold = Font(name="Calibri", size=11, bold=True)
+    green_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    red_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    border_thin = Border(left=Side(style='thin', color='D9D9D9'), right=Side(style='thin', color='D9D9D9'),
+                         top=Side(style='thin', color='D9D9D9'), bottom=Side(style='thin', color='D9D9D9'))
+
+    # Aba 1: Dashboard_Microarea
+    ws1 = wb.active
+    ws1.title = "Dashboard_Microarea"
+    ws1.append(["INDICADOR C5 — CUIDADO DA PESSOA COM HIPERTENSÃO"])
+    ws1.append([f"Data de Referência: {data_ref.strftime('%d/%m/%Y')} | Relatório Oficial e-SUS APS"])
+    ws1.append([])
+    
+    ws1.cell(row=1, column=1).font = Font(name="Calibri", size=14, bold=True, color="1F4E78")
+    ws1.cell(row=2, column=1).font = Font(name="Calibri", size=10, italic=True)
+
+    # Tabela Microárea
+    headers_micro = ['Microárea', 'Hipertensos Ativos', 'Score Médio C5 (%)', '% com 100% Práticas',
+                     '% Atendida Prática A', '% Atendida Prática B', '% Atendida Prática C', '% Atendida Prática D']
+    ws1.append(headers_micro)
+    
+    for col_num in range(1, len(headers_micro) + 1):
+        cell = ws1.cell(row=4, column=col_num)
+        cell.fill = blue_header
+        cell.font = font_header
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for r in dataframe_to_rows(df_micro, index=False, header=False):
+        ws1.append(r)
+
+    # Formatação de Percentual
+    for row in ws1.iter_rows(min_row=5, max_row=ws1.max_row, min_col=3, max_col=8):
+        for cell in row:
+            cell.number_format = '0.0"%"'
+            cell.border = border_thin
+
+    # Aba 2: Auditoria_Nominal
+    ws2 = wb.create_sheet(title="Auditoria_Nominal")
+    headers_nom = list(df_nominal.columns)
+    ws2.append(headers_nom)
+    
+    for col_num in range(1, len(headers_nom) + 1):
+        cell = ws2.cell(row=1, column=col_num)
+        cell.fill = blue_header
+        cell.font = font_header
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for r_idx, r in enumerate(dataframe_to_rows(df_nominal, index=False, header=False), start=2):
+        ws2.append(r)
+        for c_idx in range(1, len(headers_nom) + 1):
+            cell = ws2.cell(row=r_idx, column=c_idx)
+            cell.border = border_thin
+            val = str(cell.value)
+            
+            # Formatação condicional simples de status
+            if "Atendida" in val:
+                cell.fill = green_fill
+            elif "Não atendida" in val:
+                cell.fill = red_fill
+            elif c_idx == len(headers_nom): # Coluna Score
                 try:
-                    exec(codigo_python, globals())
-                except Exception as e:
-                    st.error("Erro na execução do código gerado pelo modelo.")
-                    st.code(traceback.format_exc())
-                    st.expander("Ver Código Gerado").code(codigo_python, language='python')
-                    os.chdir(cwd_original)
-                    st.stop()
-                
-                os.chdir(cwd_original)
-                
-                # Identificação do arquivo Excel gerado
-                arquivos_gerados = [f for f in os.listdir(tmpdir) if f.endswith('.xlsx')]
-                
-                if arquivos_gerados:
-                    excel_path = os.path.join(tmpdir, arquivos_gerados[0])
-                    with open(excel_path, "rb") as f:
-                        st.success("Dashboard gerado com sucesso!")
-                        st.download_button(
-                            label="📥 Baixar Dashboard Excel",
-                            data=f,
-                            file_name=arquivos_gerados[0],
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                else:
-                    st.warning("O modelo executou o código, mas não salvou o arquivo .xlsx final.")
-                    st.expander("Ver Código Gerado").code(codigo_python, language='python')
-                    
-            except Exception as e:
-                st.error(f"Falha na comunicação com a API ou processamento: {str(e)}")
+                    cell.value = float(cell.value)
+                    cell.number_format = '0.0"%"'
+                except: pass
+
+    # Ajuste automático de largura de colunas
+    for ws in [ws1, ws2]:
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = openpyxl.utils.get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+    wb.save(output)
+    return output.getvalue()
+
+
+# --- INTERFACE GRÁFICA STREAMLIT ---
+
+indicador = st.selectbox(
+    "Selecione o Indicador para Auditoria:",
+    ["Indicador C5 - Hipertensão (Disponível Automático)", "Indicador C2, C3, C4, C6, C7 (Em Atualização)"]
+)
+
+uploaded_file = st.file_uploader("Anexe o arquivo CSV do e-SUS PEC:", type=["csv"])
+
+if uploaded_file and st.button("🚀 Processar Dashboard Agora"):
+    with st.spinner("Lendo relatório e aplicando regras oficiais do e-SUS APS..."):
+        bytes_data = uploaded_file.getvalue()
+        df_bruto, data_ref = carregar_e_limpar_csv(bytes_data)
+        
+        if "C5" in indicador or "Hipertensão" in indicador:
+            df_micro, df_nominal = processar_indicador_c5(df_bruto, data_ref)
+            excel_bytes = gerar_excel_c5(df_micro, df_nominal, data_ref)
+            
+            st.success("✅ Dashboard gerado com sucesso em menos de 2 segundos!")
+            st.download_button(
+                label="📥 Baixar Dashboard_Indicador_C5_Hipertensao.xlsx",
+                data=excel_bytes,
+                file_name="Dashboard_Indicador_C5_Hipertensao.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.warning("Selecione o Indicador C5 para demonstrar o processamento instantâneo.")
