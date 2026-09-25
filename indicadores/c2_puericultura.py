@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import re
+import calendar
 from datetime import datetime
 
 from utils import (
@@ -32,6 +33,41 @@ def render():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
+def calcular_idade_extenso(dt_nasc, data_ref):
+    if not dt_nasc or str(dt_nasc).strip() in ['-', 'None', 'nan', '']:
+        return "Não informada"
+    try:
+        dt = datetime.strptime(str(dt_nasc)[:10], '%d/%m/%Y')
+    except:
+        return "Não informada"
+    
+    y1, m1, d1 = dt.year, dt.month, dt.day
+    y2, m2, d2 = data_ref.year, data_ref.month, data_ref.day
+    
+    anos = y2 - y1
+    meses = m2 - m1
+    dias = d2 - d1
+    
+    if dias < 0:
+        meses -= 1
+        prev_month = m2 - 1 if m2 > 1 else 12
+        prev_year = y2 if m2 > 1 else y2 - 1
+        dias += calendar.monthrange(prev_year, prev_month)[1]
+        
+    if meses < 0:
+        anos -= 1
+        meses += 12
+        
+    partes = []
+    if anos > 0:
+        partes.append(f"{anos} {'ano' if anos == 1 else 'anos'}")
+    if meses > 0:
+        partes.append(f"{meses} {'mês' if meses == 1 else 'meses'}")
+    if dias > 0 or not partes:
+        partes.append(f"{dias} {'dia' if dias == 1 else 'dias'}")
+        
+    return " e ".join(partes)
+
 def contar_doses_penta(txt):
     if not txt or str(txt).strip() in ['-', 'Sem registro', 'None', 'nan', '']: return 0
     doses = re.findall(r'\b(D1|D2|D3|R1|R2)\b', str(txt))
@@ -55,8 +91,9 @@ def contar_doses_scr(txt):
 def processar_c2(df, data_ref):
     df['Endereço'] = df.apply(montar_endereco, axis=1)
 
+    col_nasc = buscar_coluna_flexivel(df, ['data de nascimento', 'nascimento'])
+    
     def parse_idade_dias(row):
-        col_nasc = buscar_coluna_flexivel(df, ['data de nascimento', 'nascimento'])
         nasc_str = str(row.get(col_nasc, '') or '').strip() if col_nasc else ''
         if nasc_str and nasc_str not in ['-', 'None', 'nan']:
             try:
@@ -66,6 +103,7 @@ def processar_c2(df, data_ref):
         return 0
 
     df['Idade_Dias'] = df.apply(parse_idade_dias, axis=1)
+    df['Idade'] = df.apply(lambda r: calcular_idade_extenso(r.get(col_nasc), data_ref), axis=1)
     
     # Filtro da população ativa do C2 (até 3 anos incompletos / 1095 dias)
     df_filtered = df[df['Idade_Dias'] <= 1095].copy()
@@ -93,7 +131,7 @@ def processar_c2(df, data_ref):
         if p_a != "Atendida (1/1)" and dias <= 30:
             p_a = "Aguardando idade"
 
-        # Cronograma de metas parciais por Idade Atual
+        # Cronograma de metas esperadas por Idade Atual
         if dias < 7: meta_esp = 0
         elif dias < 30: meta_esp = 1
         elif dias < 60: meta_esp = 2
@@ -109,25 +147,33 @@ def processar_c2(df, data_ref):
         col_qcons = buscar_coluna_flexivel(df_filtered, ['quantidade de consultas ate 24 meses', 'consultas ate 24'])
         q_b = int(pd.to_numeric(row.get(col_qcons, 0), errors='coerce') or 0) if col_qcons else 0
         
-        if meta_esp == 0:
-            p_b = f"Em acompanhamento ({q_b}/0)"
-        elif q_b >= meta_esp:
-            p_b = f"Atendida ({q_b}/{meta_esp})"
+        if dias < 730:
+            if q_b >= meta_esp:
+                p_b = f"Em acompanhamento ({q_b}/{meta_esp})"
+            else:
+                p_b = f"Não atendida ({q_b}/{meta_esp})"
         else:
-            p_b = f"Não atendida ({q_b}/{meta_esp})"
+            if q_b >= 9:
+                p_b = "Atendida (9/9)"
+            else:
+                p_b = f"Não atendida ({q_b}/9)"
 
         # 3. Prática C: Antropometrias até 24 meses
         col_qant = buscar_coluna_flexivel(df_filtered, ['medicoes de peso/altura simultaneas', 'simultaneas ate 24'])
         q_c = int(pd.to_numeric(row.get(col_qant, 0), errors='coerce') or 0) if col_qant else 0
         
-        if meta_esp == 0:
-            p_c = f"Em acompanhamento ({q_c}/0)"
-        elif q_c >= meta_esp:
-            p_c = f"Atendida ({q_c}/{meta_esp})"
+        if dias < 730:
+            if q_c >= meta_esp:
+                p_c = f"Em acompanhamento ({q_c}/{meta_esp})"
+            else:
+                p_c = f"Não atendida ({q_c}/{meta_esp})"
         else:
-            p_c = f"Não atendida ({q_c}/{meta_esp})"
+            if q_c >= 9:
+                p_c = "Atendida (9/9)"
+            else:
+                p_c = f"Não atendida ({q_c}/9)"
 
-        # 4. Prática D: Visitas ACS até 24 meses (Meta: 1ª até 30d, 2ª até 6m)
+        # 4. Prática D: Visitas ACS até 24 meses
         meta_vis = 1 if dias < 30 else 2
         col_qvis = buscar_coluna_flexivel(df_filtered, ['visitas domiciliares ate os 24 meses', 'visitas ate os 24'])
         q_d = int(pd.to_numeric(row.get(col_qvis, 0), errors='coerce') or 0) if col_qvis else 0
