@@ -88,6 +88,64 @@ def contar_doses_scr(txt):
     doses = re.findall(r'\b(D1|D2|DU)\b', str(txt))
     return len(set(doses)) if doses else (1 if 'D1' in str(txt) or 'DU' in str(txt) or 'SCR' in str(txt) else 0)
 
+def avaliar_vacinas_detalhado(row, data_ref, df_ref):
+    col_penta = buscar_coluna_flexivel(df_ref, ['difteria, tetano, pertusis'])
+    col_vip = buscar_coluna_flexivel(df_ref, ['poliomielite'])
+    col_scr = buscar_coluna_flexivel(df_ref, ['sarampo, caxumba'])
+    col_vpc = buscar_coluna_flexivel(df_ref, ['pneumococica'])
+
+    nasc_str = str(row.get('Data de nascimento', '') or '').strip()
+    if not nasc_str or nasc_str in ['-', 'None', 'nan']:
+        return "Não informada"
+    
+    try:
+        dt = datetime.strptime(nasc_str[:10], '%d/%m/%Y')
+        dias = (data_ref - dt).days
+    except:
+        return "Não informada"
+
+    d_penta = contar_doses_penta(row.get(col_penta))
+    d_vip = contar_doses_vip(row.get(col_vip))
+    d_vpc = contar_doses_vpc(row.get(col_vpc))
+    d_scr = contar_doses_scr(row.get(col_scr))
+
+    # Doses esperadas para a idade atual
+    esp_penta = 0 if dias < 60 else (1 if dias < 120 else (2 if dias < 180 else 3))
+    esp_vip = 0 if dias < 60 else (1 if dias < 120 else (2 if dias < 180 else 3))
+    esp_vpc = 0 if dias < 60 else (1 if dias < 120 else (2 if dias < 365 else 3))
+    esp_scr = 0 if dias < 365 else (1 if dias < 450 else 2)
+
+    # Identificar quais vacinas específicas estão pendentes para a idade atual
+    pendentes = []
+    if d_penta < esp_penta:
+        for dose_num in range(d_penta + 1, esp_penta + 1):
+            pendentes.append(f"Penta D{dose_num}")
+            
+    if d_vip < esp_vip:
+        for dose_num in range(d_vip + 1, esp_vip + 1):
+            pendentes.append(f"VIP D{dose_num}")
+
+    if d_vpc < esp_vpc:
+        for dose_num in range(d_vpc + 1, esp_vpc + 1):
+            label = f"Pneumo D{dose_num}" if dose_num <= 2 else "Pneumo Reforço"
+            pendentes.append(label)
+
+    if d_scr < esp_scr:
+        for dose_num in range(d_scr + 1, esp_scr + 1):
+            label = "SCR D1" if dose_num == 1 else "SCR D2/Tetraviral"
+            pendentes.append(label)
+
+    # Esquema completo do indicador C2 (Penta 3, VIP 3, Pneumo 3, SCR 2)
+    esquema_completo = (d_penta >= 3) and (d_vip >= 3) and (d_vpc >= 3) and (d_scr >= 2)
+
+    if pendentes:
+        msg_pend = ", ".join(pendentes)
+        return f"Não atendida (Pendente: {msg_pend})"
+    elif esquema_completo:
+        return "Adequado (Esquema completo)"
+    else:
+        return "Em acompanhamento (Vacinação em dia)"
+
 def processar_c2(df, data_ref):
     df['Endereço'] = df.apply(montar_endereco, axis=1)
 
@@ -183,36 +241,18 @@ def processar_c2(df, data_ref):
         else:
             p_d = f"Não atendida ({q_d}/{meta_vis})"
 
-        # 5. Prática E: Vacinação em dia
-        col_penta = buscar_coluna_flexivel(df_filtered, ['difteria, tetano, pertusis'])
-        col_vip = buscar_coluna_flexivel(df_filtered, ['poliomielite'])
-        col_scr = buscar_coluna_flexivel(df_filtered, ['sarampo, caxumba'])
-        col_vpc = buscar_coluna_flexivel(df_filtered, ['pneumococica'])
+        # 5. Prática E: Vacinação em dia detalhada
+        p_e = avaliar_vacinas_detalhado(row, data_ref, df_filtered)
 
-        v_penta = str(row.get(col_penta, '') or '') if col_penta else ''
-        v_vip = str(row.get(col_vip, '') or '') if col_vip else ''
-        v_scr = str(row.get(col_scr, '') or '') if col_scr else ''
-        v_vpc = str(row.get(col_vpc, '') or '') if col_vpc else ''
+        # Cálculo do Score C2 (%)
+        pts = 0
+        if "Atendida" in p_a: pts += 1
+        if "Atendida" in p_b or "Em acompanhamento" in p_b: pts += 1
+        if "Atendida" in p_c or "Em acompanhamento" in p_c: pts += 1
+        if "Atendida" in p_d: pts += 1
+        if "Adequado" in p_e or "Em acompanhamento" in p_e: pts += 1
 
-        d_penta = contar_doses_penta(v_penta)
-        d_vip = contar_doses_vip(v_vip)
-        d_scr = contar_doses_scr(v_scr)
-        d_vpc = contar_doses_vpc(v_vpc)
-
-        esp_penta = 0 if dias < 60 else (1 if dias < 120 else (2 if dias < 180 else 3))
-        esp_vip = 0 if dias < 60 else (1 if dias < 120 else (2 if dias < 180 else 3))
-        esp_vpc = 0 if dias < 60 else (1 if dias < 120 else (2 if dias < 365 else 3))
-        esp_scr = 0 if dias < 365 else (1 if dias < 450 else 2)
-
-        vacs_ok = (d_penta >= esp_penta) and (d_vip >= esp_vip) and (d_vpc >= esp_vpc) and (d_scr >= esp_scr)
-        total_esp_vac = esp_penta + esp_vip + esp_vpc + esp_scr
-        
-        p_e = "Atendida (1/1)" if vacs_ok else ("Aguardando idade" if total_esp_vac == 0 else "Não atendida (0/1)")
-
-        praticas = [p_a, p_b, p_c, p_d, p_e]
-        avaliaveis = [p for p in praticas if ("Atendida" in p or "Não atendida" in p) and "Aguardando" not in p and "Em acompanhamento" not in p]
-        atendidas = [p for p in praticas if "Atendida" in p]
-        score = (len(atendidas) / len(avaliaveis) * 100) if avaliaveis else 100.0
+        score = (pts / 5.0) * 100
 
         return pd.Series([
             p_a, p_b, p_c, p_d, p_e, score
