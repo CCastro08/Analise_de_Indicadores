@@ -44,9 +44,11 @@ def carregar_e_limpar_csv(file_bytes):
         dtype=str
     )
     
-    # Limpeza básica de colunas e strings
+    # Limpeza básica de colunas e strings (Compatível com Pandas >= 2.1.0 usando .map em vez de .applymap)
     df.columns = [str(c).strip().replace('"', '') for c in df.columns]
-    df = df.applymap(lambda x: x.strip().replace('"', '') if isinstance(x, str) else x)
+    
+    # Aplica a limpeza célula por célula usando .map()
+    df = df.map(lambda x: x.strip().replace('"', '') if isinstance(x, str) else x)
     df = df.replace({'': None, '-': None, 'nan': None, 'NaN': None})
     
     return df, data_ref
@@ -58,7 +60,7 @@ def processar_indicador_c5(df, data_ref):
         rua = str(row.get('Rua', '') or '').strip()
         num = str(row.get('Número', '') or '').strip()
         comp = str(row.get('Complemento', '') or '').strip()
-        partes = [p for p in [rua, num, comp] if p and p != 'None']
+        partes = [p for p in [rua, num, comp] if p and p not in ['None', 'nan', '']]
         return ", ".join(partes) if partes else "Endereço não informado"
     
     df['Endereço'] = df.apply(montar_endereco, axis=1)
@@ -148,10 +150,10 @@ def processar_indicador_c5(df, data_ref):
         Pessoas_hipertensao_ativas=('Nome', 'count'),
         Score_medio_C5=('Score_C5_%', 'mean'),
         Pct_100_praticas=('Score_C5_%', lambda x: (x == 100).mean() * 100),
-        Pct_Pratica_A=('Prática A — consulta últimos 6 meses — status', lambda x: (x.str.contains("Atendida")).mean() * 100),
-        Pct_Pratica_B=('Prática B — pressão últimos 6 meses — status', lambda x: (x.str.contains("Atendida")).mean() * 100),
-        Pct_Pratica_C=('Prática C — 2 visitas em 12 meses — status', lambda x: (x.str.contains("Atendida")).mean() * 100),
-        Pct_Pratica_D=('Prática D — peso e altura últimos 12 meses — status', lambda x: (x.str.contains("Atendida")).mean() * 100)
+        Pct_Pratica_A=('Prática A — consulta últimos 6 meses — status', lambda x: (x.astype(str).str.contains("Atendida")).mean() * 100),
+        Pct_Pratica_B=('Prática B — pressão últimos 6 meses — status', lambda x: (x.astype(str).str.contains("Atendida")).mean() * 100),
+        Pct_Pratica_C=('Prática C — 2 visitas em 12 meses — status', lambda x: (x.astype(str).str.contains("Atendida")).mean() * 100),
+        Pct_Pratica_D=('Prática D — peso e altura últimos 12 meses — status', lambda x: (x.astype(str).str.contains("Atendida")).mean() * 100)
     ).reset_index()
 
     return df_micro, df_nominal
@@ -164,7 +166,6 @@ def gerar_excel_c5(df_micro, df_nominal, data_ref):
     # Estilos
     blue_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    font_bold = Font(name="Calibri", size=11, bold=True)
     green_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
     red_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
     border_thin = Border(left=Side(style='thin', color='D9D9D9'), right=Side(style='thin', color='D9D9D9'),
@@ -218,7 +219,7 @@ def gerar_excel_c5(df_micro, df_nominal, data_ref):
             cell.border = border_thin
             val = str(cell.value)
             
-            # Formatação condicional simples de status
+            # Formatação condicional de status
             if "Atendida" in val:
                 cell.fill = green_fill
             elif "Não atendida" in val:
@@ -258,7 +259,7 @@ if uploaded_file and st.button("🚀 Processar Dashboard Agora"):
             df_micro, df_nominal = processar_indicador_c5(df_bruto, data_ref)
             excel_bytes = gerar_excel_c5(df_micro, df_nominal, data_ref)
             
-            st.success("✅ Dashboard gerado com sucesso em menos de 2 segundos!")
+            st.success("✅ Dashboard gerado com sucesso!")
             st.download_button(
                 label="📥 Baixar Dashboard_Indicador_C5_Hipertensao.xlsx",
                 data=excel_bytes,
