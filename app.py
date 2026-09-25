@@ -240,7 +240,7 @@ def processar_c3(df, data_ref):
                 m_dias = re.search(r'(\d+)\s*d', txt)
                 dias_ext = int(m_dias.group(1)) if m_dias else 0
                 return (semanas * 7) + dias_ext
-        return 150 # Gestação padrão se faltar DUM/IG
+        return 150 # IG padrão caso não seja localizada
 
     df['IG_Dias_Calc'] = df.apply(extrair_ig_dias, axis=1)
 
@@ -250,8 +250,15 @@ def processar_c3(df, data_ref):
         
         def get_val_num(termos):
             c = buscar_coluna_flexivel(df, termos)
-            if c:
-                return int(pd.to_numeric(row.get(c, 0), errors='coerce') or 0)
+            if c and pd.notnull(row.get(c)):
+                try:
+                    val = str(row.get(c)).strip()
+                    # Extrai apenas os dígitos numéricos caso haja texto
+                    nums = re.findall(r'\d+', val)
+                    if nums:
+                        return int(nums[0])
+                except:
+                    pass
             return 0
 
         p_a = "Atendida" if get_val_num(['12 semanas', 'atendimentos ate 12']) >= 1 else "Não atendida"
