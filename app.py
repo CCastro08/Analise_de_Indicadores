@@ -5,6 +5,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 import io
 import re
+import unicodedata
 from datetime import datetime
 
 st.set_page_config(page_title="Auditoria e-SUS APS - SAPS/MS", layout="wide")
@@ -13,6 +14,10 @@ st.title("🏥 Sistema de Auditoria de Indicadores e-SUS APS (SAPS/MS)")
 st.subheader("Processamento Automático e Determinístico (C2, C3, C4, C5, C6, C7)")
 
 # --- UTILITÁRIOS DE LEITURA E HIGIENIZAÇÃO DE CSV ---
+
+def remover_acentos(texto):
+    if not texto: return ""
+    return unicodedata.normalize('NFD', str(texto)).encode('ascii', 'ignore').decode('utf-8').lower()
 
 def extrair_data_referencia(conteudo_bytes):
     try:
@@ -66,9 +71,10 @@ def montar_endereco(row):
 
 def buscar_coluna_flexivel(df, termos):
     for col in df.columns:
-        col_norm = col.lower().replace('á','a').replace('é','e').replace('í','i').replace('ó','o').replace('ú','u').replace('ã','a').replace('ç','c')
+        col_norm = remover_acentos(col)
         for t in termos:
-            if t in col_norm:
+            t_norm = remover_acentos(t)
+            if t_norm in col_norm:
                 return col
     return None
 
@@ -230,12 +236,12 @@ def processar_c3(df, data_ref):
         q_b = min(get_num(['quantidade de atendimentos no pre-natal']), 7)
         p_b = f"Atendida ({q_b}/{meta_7})" if q_b >= meta_7 else f"Não atendida ({q_b}/{meta_7})"
 
-        # Prática C (Pressão Arterial)
-        q_c = min(get_num(['quantidade de medicoes de pressao arterial']), 7)
+        # Prática C (Pressão Arterial - Mapeamento preciso)
+        q_c = min(get_num(['medicoes de pressao arterial', 'pressao arterial']), 7)
         p_c = f"Atendida ({q_c}/{meta_7})" if q_c >= meta_7 else f"Não atendida ({q_c}/{meta_7})"
 
-        # Prática D (Peso e Altura)
-        q_d = min(get_num(['quantidade de medicoes simultaneas de peso e altura']), 7)
+        # Prática D (Peso e Altura - Mapeamento preciso)
+        q_d = min(get_num(['medicoes simultaneas de peso e altura', 'simultaneas de peso e altura']), 7)
         p_d = f"Atendida ({q_d}/{meta_7})" if q_d >= meta_7 else f"Não atendida ({q_d}/{meta_7})"
 
         # Prática E (Visitas ACS Pré-natal)
