@@ -32,6 +32,26 @@ def render():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
+def contar_doses_penta(txt):
+    if not txt or str(txt).strip() in ['-', 'Sem registro', 'None', 'nan', '']: return 0
+    doses = re.findall(r'\b(D1|D2|D3|R1|R2)\b', str(txt))
+    return len(set(doses)) if doses else (1 if 'D -' in str(txt) or 'D1' in str(txt) else 0)
+
+def contar_doses_vip(txt):
+    if not txt or str(txt).strip() in ['-', 'Sem registro', 'None', 'nan', '']: return 0
+    doses = re.findall(r'\b(D1|D2|D3|REF|R1)\b', str(txt))
+    return len(set(doses)) if doses else (1 if 'D1' in str(txt) or 'VIP' in str(txt) else 0)
+
+def contar_doses_vpc(txt):
+    if not txt or str(txt).strip() in ['-', 'Sem registro', 'None', 'nan', '']: return 0
+    doses = re.findall(r'\b(D1|D2|REF|DU)\b', str(txt))
+    return len(set(doses)) if doses else (1 if 'D1' in str(txt) or 'VPC' in str(txt) else 0)
+
+def contar_doses_scr(txt):
+    if not txt or str(txt).strip() in ['-', 'Sem registro', 'None', 'nan', '']: return 0
+    doses = re.findall(r'\b(D1|D2|DU)\b', str(txt))
+    return len(set(doses)) if doses else (1 if 'D1' in str(txt) or 'DU' in str(txt) or 'SCR' in str(txt) else 0)
+
 def processar_c2(df, data_ref):
     df['Endereço'] = df.apply(montar_endereco, axis=1)
 
@@ -47,7 +67,7 @@ def processar_c2(df, data_ref):
 
     df['Idade_Dias'] = df.apply(parse_idade_dias, axis=1)
     
-    # Filtro de crianças ativas no acompanhamento (até 3 anos incompleto / 1095 dias)
+    # Filtro da população ativa do C2 (até 3 anos incompletos / 1095 dias)
     df_filtered = df[df['Idade_Dias'] <= 1095].copy()
     if df_filtered.empty:
         df_filtered = df.copy()
@@ -55,7 +75,7 @@ def processar_c2(df, data_ref):
     def eval_c2_row(row):
         dias = row['Idade_Dias']
         
-        # 1. Prática A: 1ª consulta até 30d / 1 mês
+        # 1. Prática A: 1ª consulta até 30d
         col_1c = buscar_coluna_flexivel(df_filtered, ['idade na primeira consulta', 'primeira consulta'])
         val_1c = str(row.get(col_1c, '') or '').strip().lower() if col_1c else ''
         
@@ -73,7 +93,7 @@ def processar_c2(df, data_ref):
         if p_a != "Atendida (1/1)" and dias <= 30:
             p_a = "Aguardando idade"
 
-        # Cronograma de metas esperadas por Idade Atual
+        # Cronograma de metas parciais por Idade Atual
         if dias < 7: meta_esp = 0
         elif dias < 30: meta_esp = 1
         elif dias < 60: meta_esp = 2
@@ -87,7 +107,7 @@ def processar_c2(df, data_ref):
 
         # 2. Prática B: Consultas até 24 meses
         col_qcons = buscar_coluna_flexivel(df_filtered, ['quantidade de consultas ate 24 meses', 'consultas ate 24'])
-        q_b = min(int(pd.to_numeric(row.get(col_qcons, 0), errors='coerce') or 0), 9) if col_qcons else 0
+        q_b = int(pd.to_numeric(row.get(col_qcons, 0), errors='coerce') or 0) if col_qcons else 0
         
         if meta_esp == 0:
             p_b = f"Em acompanhamento ({q_b}/0)"
@@ -98,7 +118,7 @@ def processar_c2(df, data_ref):
 
         # 3. Prática C: Antropometrias até 24 meses
         col_qant = buscar_coluna_flexivel(df_filtered, ['medicoes de peso/altura simultaneas', 'simultaneas ate 24'])
-        q_c = min(int(pd.to_numeric(row.get(col_qant, 0), errors='coerce') or 0), 9) if col_qant else 0
+        q_c = int(pd.to_numeric(row.get(col_qant, 0), errors='coerce') or 0) if col_qant else 0
         
         if meta_esp == 0:
             p_c = f"Em acompanhamento ({q_c}/0)"
@@ -110,7 +130,7 @@ def processar_c2(df, data_ref):
         # 4. Prática D: Visitas ACS até 24 meses (Meta: 1ª até 30d, 2ª até 6m)
         meta_vis = 1 if dias < 30 else 2
         col_qvis = buscar_coluna_flexivel(df_filtered, ['visitas domiciliares ate os 24 meses', 'visitas ate os 24'])
-        q_d = min(int(pd.to_numeric(row.get(col_qvis, 0), errors='coerce') or 0), 2) if col_qvis else 0
+        q_d = int(pd.to_numeric(row.get(col_qvis, 0), errors='coerce') or 0) if col_qvis else 0
         
         if q_d >= meta_vis:
             p_d = f"Atendida ({q_d}/{meta_vis})"
@@ -128,10 +148,10 @@ def processar_c2(df, data_ref):
         v_scr = str(row.get(col_scr, '') or '') if col_scr else ''
         v_vpc = str(row.get(col_vpc, '') or '') if col_vpc else ''
 
-        d_penta = len(re.findall(r'D\d|R\d', v_penta))
-        d_vip = len(re.findall(r'D\d|R\d|REF', v_vip))
-        d_scr = len(re.findall(r'D\d|DU', v_scr))
-        d_vpc = len(re.findall(r'D\d|REF', v_vpc))
+        d_penta = contar_doses_penta(v_penta)
+        d_vip = contar_doses_vip(v_vip)
+        d_scr = contar_doses_scr(v_scr)
+        d_vpc = contar_doses_vpc(v_vpc)
 
         esp_penta = 0 if dias < 60 else (1 if dias < 120 else (2 if dias < 180 else 3))
         esp_vip = 0 if dias < 60 else (1 if dias < 120 else (2 if dias < 180 else 3))
@@ -139,7 +159,9 @@ def processar_c2(df, data_ref):
         esp_scr = 0 if dias < 365 else (1 if dias < 450 else 2)
 
         vacs_ok = (d_penta >= esp_penta) and (d_vip >= esp_vip) and (d_vpc >= esp_vpc) and (d_scr >= esp_scr)
-        p_e = "Atendida (1/1)" if vacs_ok else ("Aguardando idade" if (esp_penta + esp_vip + esp_vpc + esp_scr) == 0 else "Não atendida (0/1)")
+        total_esp_vac = esp_penta + esp_vip + esp_vpc + esp_scr
+        
+        p_e = "Atendida (1/1)" if vacs_ok else ("Aguardando idade" if total_esp_vac == 0 else "Não atendida (0/1)")
 
         praticas = [p_a, p_b, p_c, p_d, p_e]
         avaliaveis = [p for p in praticas if ("Atendida" in p or "Não atendida" in p) and "Aguardando" not in p and "Em acompanhamento" not in p]
