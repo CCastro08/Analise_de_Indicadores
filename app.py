@@ -12,7 +12,7 @@ st.set_page_config(page_title="Auditoria e-SUS APS - SAPS/MS", layout="wide")
 st.title("🏥 Sistema de Auditoria de Indicadores e-SUS APS (SAPS/MS)")
 st.subheader("Processamento Automático e Determinístico (C2, C3, C4, C5, C6, C7)")
 
-# UTILITÁRIOS DE LEITURA E HIGIENIZAÇÃO DE CSV
+# --- UTILITÁRIOS DE LEITURA E HIGIENIZAÇÃO DE CSV ---
 
 def extrair_data_referencia(conteudo_bytes):
     try:
@@ -74,7 +74,7 @@ def buscar_coluna_flexivel(df, termos):
                 return col
     return None
 
-# GERADOR DE EXCEL PADRONIZADO
+# --- GERADOR DE EXCEL PADRONIZADO ---
 
 def gerar_excel_padrao(df_micro, df_nominal, titulo, data_ref, cols_status, col_score):
     output = io.BytesIO()
@@ -155,73 +155,10 @@ def gerar_excel_padrao(df_micro, df_nominal, titulo, data_ref, cols_status, col_
     wb.save(output)
     return output.getvalue()
 
-# REGRAS DOS INDICADORES (C2 - C7)
-
-def processar_c2(df, data_ref):
-    col_nasc = buscar_coluna_flexivel(df, ['nascimento', 'dt_nasc'])
-    if col_nasc:
-        df['Nascimento'] = pd.to_datetime(df[col_nasc], format='%d/%m/%Y', errors='coerce')
-        df['Idade_Dias'] = (data_ref - df['Nascimento']).dt.days
-        df = df[df['Idade_Dias'] < 1096].copy()
-    else:
-        df['Idade_Dias'] = 300
-
-    if df.empty:
-        df_micro = pd.DataFrame(columns=['Microárea', 'Crianças_Ativas', 'Score_Médio', 'Pct_100_Avaliável'])
-        return df_micro, pd.DataFrame(columns=['Microárea', 'Nome', 'CPF', 'Score_C2_%'])
-
-    def eval_c2(row):
-        dias = row.get('Idade_Dias', 300)
-        col_cons1 = buscar_coluna_flexivel(df, ['primeira consulta', 'precoce'])
-        p_a = "Não atendida"
-        if col_cons1 and row.get(col_cons1):
-            try:
-                dt = datetime.strptime(str(row.get(col_cons1))[:10], '%d/%m/%Y')
-                if (dt - row.get('Nascimento', dt)).days <= 30: p_a = "Atendida"
-            except: pass
-        if p_a != "Atendida" and dias <= 30: p_a = "Aguardando idade"
-
-        col_q_cons = buscar_coluna_flexivel(df, ['consultas', 'quantidade de consultas'])
-        qtd_cons = int(pd.to_numeric(row.get(col_q_cons, 0), errors='coerce') or 0) if col_q_cons else 0
-        p_b = "Atendida" if qtd_cons >= 9 else ("Aguardando idade" if dias < 730 else "Não atendida")
-
-        col_q_ant = buscar_coluna_flexivel(df, ['simultaneas', 'peso e altura', 'antropometria'])
-        qtd_ant = int(pd.to_numeric(row.get(col_q_ant, 0), errors='coerce') or 0) if col_q_ant else 0
-        p_c = "Atendida" if qtd_ant >= 9 else ("Aguardando idade" if dias < 730 else "Não atendida")
-
-        col_vis = buscar_coluna_flexivel(df, ['visita', 'visitas'])
-        dts_v = extrair_datas_validas(row.get(col_vis), data_ref, 180) if col_vis else []
-        p_d = "Atendida" if len(dts_v) >= 2 else ("Aguardando idade" if dias < 180 else "Não atendida")
-
-        col_vac = buscar_coluna_flexivel(df, ['vacina', 'situacao vacinal'])
-        p_e = "Atendida" if col_vac and str(row.get(col_vac, '')).lower() in ['em dia', 'sim', 'completa'] else ("Aguardando idade" if dias < 365 else "Não atendida")
-
-        praticas = [p_a, p_b, p_c, p_d, p_e]
-        avaliaveis = [p for p in praticas if p in ["Atendida", "Não atendida"]]
-        atendidas = [p for p in praticas if p == "Atendida"]
-        score = (len(atendidas) / len(avaliaveis) * 100) if avaliaveis else 100.0
-
-        return pd.Series([p_a, p_b, p_c, p_d, p_e, score],
-                         index=['Prática A (1ª Consulta <=30d)', 'Prática B (9 Consultas)', 'Prática C (9 Antropometrias)',
-                                'Prática D (Visitas ACS)', 'Prática E (Vacinas)', 'Score_C2_%'])
-
-    res = df.apply(eval_c2, axis=1)
-    for c in res.columns: df[c] = res[c]
-
-    cols_nom = ['Microárea', 'Nome', 'CPF', 'Prática A (1ª Consulta <=30d)', 'Prática B (9 Consultas)', 
-                'Prática C (9 Antropometrias)', 'Prática D (Visitas ACS)', 'Prática E (Vacinas)', 'Score_C2_%']
-    for c in cols_nom:
-        if c not in df.columns: df[c] = "-"
-
-    df_micro = df.groupby('Microárea').agg(
-        Crianças_Ativas=('Nome', 'count'),
-        Score_Médio=('Score_C2_%', 'mean'),
-        Pct_100_Avaliável=('Score_C2_%', lambda x: (x == 100).mean() * 100)
-    ).reset_index()
-
-    return df_micro, df[cols_nom]
+# --- MÓDULO INDICADOR C3 (GESTANTES E PUÉRPERAS) ---
 
 def processar_c3(df, data_ref):
+    df['Endereço'] = df.apply(montar_endereco, axis=1)
     col_dum = buscar_coluna_flexivel(df, ['dum'])
     col_ig = buscar_coluna_flexivel(df, ['idade gestacional', 'ig atual', 'ig'])
     
@@ -240,69 +177,141 @@ def processar_c3(df, data_ref):
                 m_dias = re.search(r'(\d+)\s*d', txt)
                 dias_ext = int(m_dias.group(1)) if m_dias else 0
                 return (semanas * 7) + dias_ext
-        return 150 # IG padrão caso não seja localizada
+        return 140 # Valor padrão (20 semanas) caso ausente
 
     df['IG_Dias_Calc'] = df.apply(extrair_ig_dias, axis=1)
+    df['IG_Semanas'] = df['IG_Dias_Calc'] // 7
+
+    def converter_ig_texto(sem):
+        if sem <= 4: mes = "1º Mês"
+        elif sem <= 8: mes = "2º Mês"
+        elif sem <= 13: mes = "3º Mês"
+        elif sem <= 17: mes = "4º Mês"
+        elif sem <= 22: mes = "5º Mês"
+        elif sem <= 27: mes = "6º Mês"
+        elif sem <= 31: mes = "7º Mês"
+        elif sem <= 35: mes = "8º Mês"
+        elif sem <= 40: mes = "9º Mês"
+        elif sem < 42: mes = "Pós-data"
+        else: mes = "Pós-termo: ≥42 semanas"
+        return f"{sem} semanas ({mes})"
+
+    df['Idade gestacional atual'] = df['IG_Semanas'].apply(converter_ig_texto)
+
+    # Captura flexível de últimas consultas e visitas
+    col_ult_cons = buscar_coluna_flexivel(df, ['data da ultima consulta', 'ultima consulta'])
+    col_ult_vis = buscar_coluna_flexivel(df, ['ultima visita', 'visitas domiciliares'])
+    df['Data da última consulta'] = df[col_ult_cons] if col_ult_cons else "Não informada"
+    df['Data da última visita'] = df[col_ult_vis] if col_ult_vis else "Não informada"
 
     def eval_c3(row):
-        ig = row['IG_Dias_Calc']
-        is_puerpera = ig > 294
+        sem = row['IG_Semanas']
+        ig_dias = row['IG_Dias_Calc']
+        is_puerpera = ig_dias > 294
         
         def get_val_num(termos):
             c = buscar_coluna_flexivel(df, termos)
             if c and pd.notnull(row.get(c)):
                 try:
-                    val = str(row.get(c)).strip()
-                    # Extrai apenas os dígitos numéricos caso haja texto
-                    nums = re.findall(r'\d+', val)
-                    if nums:
-                        return int(nums[0])
-                except:
-                    pass
+                    nums = re.findall(r'\d+', str(row.get(c)))
+                    if nums: return int(nums[0])
+                except: pass
             return 0
 
-        p_a = "Atendida" if get_val_num(['12 semanas', 'atendimentos ate 12']) >= 1 else "Não atendida"
-        p_b = "Atendida" if get_val_num(['consultas de pre-natal', 'consultas pre natal']) >= 7 else "Não atendida"
-        p_c = "Atendida" if get_val_num(['afericoes de pressao', 'pressao arterial']) >= 7 else "Não atendida"
-        p_d = "Atendida" if get_val_num(['peso e altura', 'antropometria']) >= 7 else "Não atendida"
-        p_e = "Atendida" if get_val_num(['visitas domiciliares', 'visitas acs']) >= 3 else "Não atendida"
-        
+        # Cálculo da meta esperada de consultas segundo a IG atual
+        if sem <= 28: esperadas = max(1, sem // 4)
+        elif sem <= 36: esperadas = 7 + max(0, (sem - 28) // 2)
+        else: esperadas = 11 + max(0, sem - 36)
+        esperadas_7 = min(esperadas, 7)
+        esperadas_3 = min(max(1, sem // 10), 3)
+
+        # Prática A (1ª Consulta <=12 sem)
+        q_a = get_val_num(['12 semanas', 'atendimentos ate 12'])
+        p_a = "Atendida" if q_a >= 1 else "Não atendida"
+
+        # Prática B (Consultas de Pré-natal)
+        q_b = min(get_val_num(['consultas de pre-natal', 'consultas pre natal']), 7)
+        p_b = f"Atendida ({q_b}/{esperadas_7})" if q_b >= esperadas_7 else f"Não atendida ({q_b}/{esperadas_7})"
+
+        # Prática C (Aferição de Pressão Arterial)
+        q_c = min(get_val_num(['afericoes de pressao', 'pressao arterial']), 7)
+        p_c = f"Atendida ({q_c}/{esperadas_7})" if q_c >= esperadas_7 else f"Não atendida ({q_c}/{esperadas_7})"
+
+        # Prática D (Peso e Altura)
+        q_d = min(get_val_num(['peso e altura', 'antropometria']), 7)
+        p_d = f"Atendida ({q_d}/{esperadas_7})" if q_d >= esperadas_7 else f"Não atendida ({q_d}/{esperadas_7})"
+
+        # Prática E (Visitas ACS Pré-natal)
+        q_e = min(get_val_num(['visitas domiciliares', 'visitas acs']), 3)
+        p_e = f"Atendida ({q_e}/{esperadas_3})" if q_e >= esperadas_3 else f"Não atendida ({q_e}/{esperadas_3})"
+
+        # Prática F (dTpa >=20 sem)
         col_dtpa = buscar_coluna_flexivel(df, ['dtpa'])
         dtpa_v = str(row.get(col_dtpa, '') or '').strip() if col_dtpa else ''
-        p_f = "Atendida" if dtpa_v and dtpa_v not in ['-', 'None', 'nan', ''] else ("Aguardando idade" if ig < 140 else "Não atendida")
-        
-        p_g = "Aguardando idade" if ig <= 97 else "Não atendida"
+        p_f = "Atendida" if dtpa_v and dtpa_v not in ['-', 'None', 'nan', ''] else ("Aguardando idade" if sem < 20 else "Não atendida")
+
+        # Prática G (Exames 1º Trimestre)
+        p_g = "Aguardando idade" if sem < 14 else "Não atendida"
         col_hiv1 = buscar_coluna_flexivel(df, ['hiv 1', 'hiv 1ºt'])
         if col_hiv1 and str(row.get(col_hiv1, '')).upper() in ['SIM', 'REALIZADO']: p_g = "Atendida"
 
-        p_h = "Aguardando idade" if ig < 196 else "Não atendida"
+        # Prática H (Exames 3º Trimestre)
+        p_h = "Aguardando idade" if sem < 28 else "Não atendida"
         col_hiv3 = buscar_coluna_flexivel(df, ['hiv 3', 'hiv 3ºt'])
         if col_hiv3 and str(row.get(col_hiv3, '')).upper() in ['SIM', 'REALIZADO']: p_h = "Atendida"
 
+        # Práticas I e J (Puerpério)
         col_cp = buscar_coluna_flexivel(df, ['consulta puerperio', 'puerperio consulta'])
         p_i = ("Atendida (1/1)" if col_cp and str(row.get(col_cp, '')).strip() not in ['-', '', 'None'] else "Não atendida (0/1)") if is_puerpera else "Não se aplica"
         
         col_vp = buscar_coluna_flexivel(df, ['visita puerperio', 'puerperio visita'])
         p_j = ("Atendida (1/1)" if col_vp and str(row.get(col_vp, '')).strip() not in ['-', '', 'None'] else "Não atendida (0/1)") if is_puerpera else "Não se aplica"
-        
+
+        # Prática K (Saúde Bucal)
         col_odonto = buscar_coluna_flexivel(df, ['odonto', 'odontologico'])
         p_k = "Atendida (1/1)" if col_odonto and get_val_num(['odonto']) >= 1 else "Não atendida (0/1)"
 
         praticas = [p_a, p_b, p_c, p_d, p_e, p_f, p_g, p_h, p_i, p_j, p_k]
-        avaliaveis = [p for p in praticas if "Atendida" in p or "Não atendida" in p]
+        avaliaveis = [p for p in praticas if ("Atendida" in p or "Não atendida" in p) and "Não se aplica" not in p and "Aguardando" not in p]
         atendidas = [p for p in praticas if "Atendida" in p]
         score = (len(atendidas) / len(avaliaveis) * 100) if avaliaveis else 100.0
 
-        return pd.Series([p_a, p_b, p_c, p_d, p_e, p_f, p_g, p_h, p_i, p_j, p_k, score],
-                         index=['Prática A', 'Prática B', 'Prática C', 'Prática D', 'Prática E', 'Prática F',
-                                'Prática G', 'Prática H', 'Prática I', 'Prática J', 'Prática K', 'Score_C3_%'])
+        return pd.Series([
+            p_a, p_b, p_c, p_d, p_e, p_f, p_g, p_h, p_i, p_j, p_k, score
+        ], index=[
+            'Prática A — 1ª consulta até 12ª sem — status',
+            'Prática B — consultas de pré-natal — status',
+            'Prática C — aferição de pressão arterial — status',
+            'Prática D — peso e altura — status',
+            'Prática E — visitas ACS pré-natal — status',
+            'Prática F — vacina dTpa a partir de 20 sem — status',
+            'Prática G — exames 1º trimestre (HIV/Sífilis/HepB/HepC) — status',
+            'Prática H — exames 3º trimestre (HIV/Sífilis) — status',
+            'Prática I — consulta puerpério — status',
+            'Prática J — visita ACS puerpério — status',
+            'Prática K — atendimento odontológico — status',
+            'Score_C3_%'
+        ])
 
     res_c3 = df.apply(eval_c3, axis=1)
     for col in res_c3.columns: df[col] = res_c3[col]
 
-    cols_nom = ['Microárea', 'Nome', 'CPF', 'Telefone celular', 'Risco gestacional', 
-                'Prática A', 'Prática B', 'Prática C', 'Prática D', 'Prática E', 'Prática F', 
-                'Prática G', 'Prática H', 'Prática I', 'Prática J', 'Prática K', 'Score_C3_%']
+    cols_nom = [
+        'Microárea', 'Nome', 'CPF', 'Telefone celular', 'Endereço', 'Risco gestacional',
+        'Idade gestacional atual', 'Data da última consulta', 'Data da última visita',
+        'Prática A — 1ª consulta até 12ª sem — status',
+        'Prática B — consultas de pré-natal — status',
+        'Prática C — aferição de pressão arterial — status',
+        'Prática D — peso e altura — status',
+        'Prática E — visitas ACS pré-natal — status',
+        'Prática F — vacina dTpa a partir de 20 sem — status',
+        'Prática G — exames 1º trimestre (HIV/Sífilis/HepB/HepC) — status',
+        'Prática H — exames 3º trimestre (HIV/Sífilis) — status',
+        'Prática I — consulta puerpério — status',
+        'Prática J — visita ACS puerpério — status',
+        'Prática K — atendimento odontológico — status',
+        'Score_C3_%'
+    ]
     
     for c in cols_nom:
         if c not in df.columns: df[c] = "-"
@@ -311,6 +320,68 @@ def processar_c3(df, data_ref):
         Gestantes_Puerperas_Ativas=('Nome', 'count'),
         Score_Médio_C3=('Score_C3_%', 'mean'),
         Pct_100_Avaliável=('Score_C3_%', lambda x: (x == 100).mean() * 100)
+    ).reset_index()
+
+    return df_micro, df[cols_nom]
+
+# --- OUTROS INDICADORES (MANTIDOS E INTEGRADOS) ---
+
+def processar_c2(df, data_ref):
+    df['Endereço'] = df.apply(montar_endereco, axis=1)
+    col_nasc = buscar_coluna_flexivel(df, ['nascimento', 'dt_nasc'])
+    if col_nasc:
+        df['Nascimento'] = pd.to_datetime(df[col_nasc], format='%d/%m/%Y', errors='coerce')
+        df['Idade_Dias'] = (data_ref - df['Nascimento']).dt.days
+        df = df[df['Idade_Dias'] < 1096].copy()
+    else: df['Idade_Dias'] = 300
+
+    def eval_c2(row):
+        dias = row.get('Idade_Dias', 300)
+        col_cons1 = buscar_coluna_flexivel(df, ['primeira consulta', 'precoce'])
+        p_a = "Não atendida (0/1)"
+        if col_cons1 and row.get(col_cons1):
+            try:
+                dt = datetime.strptime(str(row.get(col_cons1))[:10], '%d/%m/%Y')
+                if (dt - row.get('Nascimento', dt)).days <= 30: p_a = "Atendida (1/1)"
+            except: pass
+        if p_a != "Atendida (1/1)" and dias <= 30: p_a = "Aguardando idade"
+
+        col_q_cons = buscar_coluna_flexivel(df, ['consultas', 'quantidade de consultas'])
+        qtd_cons = min(int(pd.to_numeric(row.get(col_q_cons, 0), errors='coerce') or 0), 9) if col_q_cons else 0
+        p_b = f"Atendida ({qtd_cons}/9)" if qtd_cons >= 9 else ("Aguardando idade" if dias < 730 else f"Não atendida ({qtd_cons}/9)")
+
+        col_q_ant = buscar_coluna_flexivel(df, ['simultaneas', 'peso e altura', 'antropometria'])
+        qtd_ant = min(int(pd.to_numeric(row.get(col_q_ant, 0), errors='coerce') or 0), 9) if col_q_ant else 0
+        p_c = f"Atendida ({qtd_ant}/9)" if qtd_ant >= 9 else ("Aguardando idade" if dias < 730 else f"Não atendida ({qtd_ant}/9)")
+
+        col_vis = buscar_coluna_flexivel(df, ['visita', 'visitas'])
+        dts_v = extrair_datas_validas(row.get(col_vis), data_ref, 180) if col_vis else []
+        p_d = "Atendida (2/2)" if len(dts_v) >= 2 else ("Aguardando idade" if dias < 180 else "Não atendida (0/2)")
+
+        col_vac = buscar_coluna_flexivel(df, ['vacina', 'situacao vacinal'])
+        p_e = "Atendida (1/1)" if col_vac and str(row.get(col_vac, '')).lower() in ['em dia', 'sim', 'completa'] else ("Aguardando idade" if dias < 365 else "Não atendida (0/1)")
+
+        praticas = [p_a, p_b, p_c, p_d, p_e]
+        avaliaveis = [p for p in praticas if "Atendida" in p or "Não atendida" in p]
+        atendidas = [p for p in praticas if "Atendida" in p]
+        score = (len(atendidas) / len(avaliaveis) * 100) if avaliaveis else 100.0
+
+        return pd.Series([p_a, p_b, p_c, p_d, p_e, score],
+                         index=['Prática A — 1ª consulta até 30d — status', 'Prática B — 9 consultas — status', 'Prática C — 9 antropometrias — status',
+                                'Prática D — visitas ACS — status', 'Prática E — vacinação em dia — status', 'Score_C2_%'])
+
+    res = df.apply(eval_c2, axis=1)
+    for c in res.columns: df[c] = res[c]
+
+    cols_nom = ['Microárea', 'Nome', 'CPF', 'Telefone celular', 'Endereço', 'Prática A — 1ª consulta até 30d — status', 'Prática B — 9 consultas — status', 
+                'Prática C — 9 antropometrias — status', 'Prática D — visitas ACS — status', 'Prática E — vacinação em dia — status', 'Score_C2_%']
+    for c in cols_nom:
+        if c not in df.columns: df[c] = "-"
+
+    df_micro = df.groupby('Microárea').agg(
+        Crianças_Ativas=('Nome', 'count'),
+        Score_Médio=('Score_C2_%', 'mean'),
+        Pct_100_Avaliável=('Score_C2_%', lambda x: (x == 100).mean() * 100)
     ).reset_index()
 
     return df_micro, df[cols_nom]
@@ -346,15 +417,15 @@ def processar_c4(df, data_ref):
         pts = sum([1 for s in [p_a, p_b, p_c, p_d, p_e, p_f] if "Atendida" in s])
         score = (pts / 6.0) * 100
         return pd.Series([p_a, p_b, p_c, p_d, p_e, p_f, score],
-                         index=['Prática A — consulta 6m', 'Prática B — pressão 6m', 'Prática C — 2 visitas 12m',
-                                'Prática D — peso/altura 12m', 'Prática E — HbA1c 12m', 'Prática F — pés 12m', 'Score_C4_%'])
+                         index=['Prática A — consulta 6m — status', 'Prática B — pressão 6m — status', 'Prática C — 2 visitas 12m — status',
+                                'Prática D — peso/altura 12m — status', 'Prática E — HbA1c 12m — status', 'Prática F — pés 12m — status', 'Score_C4_%'])
 
     res = df.apply(eval_c4, axis=1)
     for c in res.columns: df[c] = res[c]
 
     cols_nom = ['Microárea', 'Nome', 'CPF', 'Telefone celular', 'Endereço',
-                'Prática A — consulta 6m', 'Prática B — pressão 6m', 'Prática C — 2 visitas 12m',
-                'Prática D — peso/altura 12m', 'Prática E — HbA1c 12m', 'Prática F — pés 12m', 'Score_C4_%']
+                'Prática A — consulta 6m — status', 'Prática B — pressão 6m — status', 'Prática C — 2 visitas 12m — status',
+                'Prática D — peso/altura 12m — status', 'Prática E — HbA1c 12m — status', 'Prática F — pés 12m — status', 'Score_C4_%']
     for c in cols_nom:
         if c not in df.columns: df[c] = "-"
 
@@ -395,15 +466,15 @@ def processar_c5(df, data_ref):
         pts = sum([1 for s in [p_a, p_b, p_c, p_d] if "Atendida" in s])
         score = (pts / 4.0) * 100
         return pd.Series([p_a, p_b, p_c, p_d, score],
-                         index=['Prática A — consulta 6m', 'Prática B — pressão 6m', 
-                                'Prática C — 2 visitas 12m', 'Prática D — peso/altura 12m', 'Score_C5_%'])
+                         index=['Prática A — consulta 6m — status', 'Prática B — pressão 6m — status', 
+                                'Prática C — 2 visitas 12m — status', 'Prática D — peso/altura 12m — status', 'Score_C5_%'])
 
     res = df.apply(eval_c5, axis=1)
     for c in res.columns: df[c] = res[c]
 
     cols_nom = ['Microárea', 'Nome', 'CPF', 'Telefone celular', 'Endereço',
-                'Prática A — consulta 6m', 'Prática B — pressão 6m', 
-                'Prática C — 2 visitas 12m', 'Prática D — peso/altura 12m', 'Score_C5_%']
+                'Prática A — consulta 6m — status', 'Prática B — pressão 6m — status', 
+                'Prática C — 2 visitas 12m — status', 'Prática D — peso/altura 12m — status', 'Score_C5_%']
     for c in cols_nom:
         if c not in df.columns: df[c] = "-"
 
@@ -426,8 +497,8 @@ def processar_c6(df, data_ref):
         p_a = "Atendida (1/1)" if ((pd.notnull(d_med) and 0 <= d_med <= 365) or (pd.notnull(d_enf) and 0 <= d_enf <= 365)) else "Não atendida (0/1)"
 
         col_ant = buscar_coluna_flexivel(df, ['peso e altura simultaneos', 'simultaneos'])
-        qtd_ant = int(pd.to_numeric(row.get(col_ant, 0), errors='coerce') or 0) if col_ant else 0
-        p_b = "Atendida (2/2)" if qtd_ant >= 2 else "Não atendida (0/2)"
+        qtd_ant = min(int(pd.to_numeric(row.get(col_ant, 0), errors='coerce') or 0), 2) if col_ant else 0
+        p_b = f"Atendida ({qtd_ant}/2)" if qtd_ant >= 2 else f"Não atendida ({qtd_ant}/2)"
 
         col_vis = buscar_coluna_flexivel(df, ['visitas'])
         dts_v = extrair_datas_validas(row.get(col_vis), data_ref, 365) if col_vis else []
@@ -445,15 +516,15 @@ def processar_c6(df, data_ref):
         pts = sum([1 for s in [p_a, p_b, p_c, p_d] if "Atendida" in s])
         score = (pts / 4.0) * 100
         return pd.Series([p_a, p_b, p_c, p_d, score],
-                         index=['Prática A — consulta 12m', 'Prática B — 2 antropometrias 12m',
-                                'Prática C — 2 visitas 12m', 'Prática D — vacina influenza 12m', 'Score_C6_%'])
+                         index=['Prática A — consulta 12m — status', 'Prática B — 2 antropometrias 12m — status',
+                                'Prática C — 2 visitas 12m — status', 'Prática D — vacina influenza 12m — status', 'Score_C6_%'])
 
     res = df.apply(eval_c6, axis=1)
     for c in res.columns: df[c] = res[c]
 
     cols_nom = ['Microárea', 'Nome', 'CPF', 'Telefone celular', 'Endereço',
-                'Prática A — consulta 12m', 'Prática B — 2 antropometrias 12m',
-                'Prática C — 2 visitas 12m', 'Prática D — vacina influenza 12m', 'Score_C6_%']
+                'Prática A — consulta 12m — status', 'Prática B — 2 antropometrias 12m — status',
+                'Prática C — 2 visitas 12m — status', 'Prática D — vacina influenza 12m — status', 'Score_C6_%']
     for c in cols_nom:
         if c not in df.columns: df[c] = "-"
 
@@ -471,8 +542,7 @@ def processar_c7(df, data_ref):
     if col_nasc:
         df['Nascimento'] = pd.to_datetime(df[col_nasc], format='%d/%m/%Y', errors='coerce')
         df['Idade'] = ((data_ref - df['Nascimento']).dt.days / 365.25).fillna(30).astype(int)
-    else:
-        df['Idade'] = 30
+    else: df['Idade'] = 30
 
     def eval_c7(row):
         idade = row['Idade']
@@ -519,15 +589,15 @@ def processar_c7(df, data_ref):
         score = (len(atendidas) / len(aplicaveis) * 100) if aplicaveis else 100.0
 
         return pd.Series([p_a, p_b, p_c, p_d, score],
-                         index=['Prática A — colo do útero 25-64a (36m)', 'Prática B — vacina HPV 9-14a',
-                                'Prática C — saúde sexual/reprodutiva 14-69a (12m)', 'Prática D — câncer de mama 50-69a (24m)', 'Score_C7_%'])
+                         index=['Prática A — colo do útero 25-64a (36m) — status', 'Prática B — vacina HPV 9-14a — status',
+                                'Prática C — saúde sexual/reprodutiva 14-69a (12m) — status', 'Prática D — câncer de mama 50-69a (24m) — status', 'Score_C7_%'])
 
     res = df.apply(eval_c7, axis=1)
     for c in res.columns: df[c] = res[c]
 
     cols_nom = ['Microárea', 'Nome', 'CPF', 'Idade', 'Telefone celular', 'Endereço',
-                'Prática A — colo do útero 25-64a (36m)', 'Prática B — vacina HPV 9-14a',
-                'Prática C — saúde sexual/reprodutiva 14-69a (12m)', 'Prática D — câncer de mama 50-69a (24m)', 'Score_C7_%']
+                'Prática A — colo do útero 25-64a (36m) — status', 'Prática B — vacina HPV 9-14a — status',
+                'Prática C — saúde sexual/reprodutiva 14-69a (12m) — status', 'Prática D — câncer de mama 50-69a (24m) — status', 'Score_C7_%']
     for c in cols_nom:
         if c not in df.columns: df[c] = "-"
 
@@ -539,7 +609,7 @@ def processar_c7(df, data_ref):
 
     return df_micro, df[cols_nom]
 
-# INTERFACE GRÁFICA PRINCIPAL
+# --- INTERFACE GRÁFICA PRINCIPAL ---
 
 mapa_indicadores = {
     "Indicador C2 — Puericultura (Crianças <3 anos)": ("C2", processar_c2, "INDICADOR C2 — PUERICULTURA", "Score_C2_%"),
