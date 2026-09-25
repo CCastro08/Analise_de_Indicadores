@@ -206,11 +206,35 @@ def processar_c2(df, data_ref):
 def processar_c3(df, data_ref):
     df['DUM_dt'] = pd.to_datetime(df.get('DUM'), format='%d/%m/%Y', errors='coerce')
     df = df[df['DUM_dt'].notnull()].copy()
-    df['IG_Dias'] = (data_ref - df['DUM_dt']).dt.days
-    df = df[(df['IG_Dias'] >= 0) & (df['IG_Dias'] <= 336)].copy() # Gestantes e Puérperas
     
+    # Se não houver gestantes com DUM válida no arquivo
+    if df.empty:
+        cols_c3 = ['Prática A', 'Prática B', 'Prática C', 'Prática D', 'Prática E', 'Prática F',
+                   'Prática G', 'Prática H', 'Prática I', 'Prática J', 'Prática K', 'Score_C3_%']
+        for c in cols_c3:
+            df[c] = []
+        cols_nom = ['Microárea', 'Nome', 'CPF', 'Telefone celular', 'Risco gestacional'] + cols_c3
+        for c in cols_nom:
+            if c not in df.columns: df[c] = []
+        df_micro = pd.DataFrame(columns=['Microárea', 'Gestantes_Puerperas_Ativas', 'Score_Médio_C3', 'Pct_100_Avaliável'])
+        return df_micro, df[cols_nom]
+
+    df['IG_Dias'] = (data_ref - df['DUM_dt']).dt.days
+    df = df[(df['IG_Dias'] >= 0) & (df['IG_Dias'] <= 336)].copy() # Gestantes (0-294d) e Puérperas (295-336d)
+
+    if df.empty:
+        cols_c3 = ['Prática A', 'Prática B', 'Prática C', 'Prática D', 'Prática E', 'Prática F',
+                   'Prática G', 'Prática H', 'Prática I', 'Prática J', 'Prática K', 'Score_C3_%']
+        for c in cols_c3:
+            df[c] = []
+        cols_nom = ['Microárea', 'Nome', 'CPF', 'Telefone celular', 'Risco gestacional'] + cols_c3
+        for c in cols_nom:
+            if c not in df.columns: df[c] = []
+        df_micro = pd.DataFrame(columns=['Microárea', 'Gestantes_Puerperas_Ativas', 'Score_Médio_C3', 'Pct_100_Avaliável'])
+        return df_micro, df[cols_nom]
+
     def eval_c3(row):
-        ig = row['IG_Dias']
+        ig = row.get('IG_Dias', 0)
         is_puerpera = ig > 294
         
         p_a = "Atendida" if int(pd.to_numeric(row.get('Quantidade de atendimentos até 12 semanas no pré-natal', 0), errors='coerce') or 0) >= 1 else "Não atendida"
@@ -218,13 +242,15 @@ def processar_c3(df, data_ref):
         p_c = "Atendida" if int(pd.to_numeric(row.get('Quantidade de aferições de pressão arterial', 0), errors='coerce') or 0) >= 7 else "Não atendida"
         p_d = "Atendida" if int(pd.to_numeric(row.get('Quantidade de medições de peso e altura', 0), errors='coerce') or 0) >= 7 else "Não atendida"
         p_e = "Atendida" if int(pd.to_numeric(row.get('Quantidade de visitas domiciliares', 0), errors='coerce') or 0) >= 3 else "Não atendida"
-        p_f = "Atendida" if str(row.get('dTpa', '')).strip() != '' else ("Aguardando idade" if ig < 140 else "Não atendida")
+        
+        dtpa_val = str(row.get('dTpa', '') or '').strip()
+        p_f = "Atendida" if dtpa_val and dtpa_val not in ['-', 'None', 'nan'] else ("Aguardando idade" if ig < 140 else "Não atendida")
         
         ex_1t = [row.get('HIV 1ºT'), row.get('Sífilis 1ºT'), row.get('Hep B 1ºT'), row.get('Hep C 1ºT')]
-        p_g = "Atendida" if all([str(x).upper() in ['SIM', 'REALIZADO'] for x in ex_1t]) else ("Aguardando idade" if ig <= 97 else "Não atendida")
+        p_g = "Atendida" if all([str(x or '').upper() in ['SIM', 'REALIZADO'] for x in ex_1t]) else ("Aguardando idade" if ig <= 97 else "Não atendida")
 
         ex_3t = [row.get('HIV 3ºT'), row.get('Sífilis 3ºT')]
-        p_h = "Atendida" if all([str(x).upper() in ['SIM', 'REALIZADO'] for x in ex_3t]) else ("Aguardando idade" if ig < 196 else "Não atendida")
+        p_h = "Atendida" if all([str(x or '').upper() in ['SIM', 'REALIZADO'] for x in ex_3t]) else ("Aguardando idade" if ig < 196 else "Não atendida")
 
         p_i = ("Atendida (1/1)" if row.get('Consulta Puerpério') else "Não atendida (0/1)") if is_puerpera else "Não se aplica"
         p_j = ("Atendida (1/1)" if row.get('Visita Puerpério') else "Não atendida (0/1)") if is_puerpera else "Não se aplica"
@@ -235,14 +261,21 @@ def processar_c3(df, data_ref):
         atendidas = [p for p in praticas if "Atendida" in p]
         score = (len(atendidas) / len(avaliaveis) * 100) if avaliaveis else 100.0
 
-        return pd.Series([p_a, p_b, p_c, p_d, p_e, p_f, p_g, p_h, p_i, p_j, p_k, score])
+        return pd.Series([p_a, p_b, p_c, p_d, p_e, p_f, p_g, p_h, p_i, p_j, p_k, score],
+                         index=['Prática A', 'Prática B', 'Prática C', 'Prática D', 'Prática E', 'Prática F',
+                                'Prática G', 'Prática H', 'Prática I', 'Prática J', 'Prática K', 'Score_C3_%'])
 
-    df[['Prática A', 'Prática B', 'Prática C', 'Prática D', 'Prática E', 'Prática F',
-        'Prática G', 'Prática H', 'Prática I', 'Prática J', 'Prática K', 'Score_C3_%']] = df.apply(eval_c3, axis=1)
+    res_c3 = df.apply(eval_c3, axis=1)
+    for col in res_c3.columns:
+        df[col] = res_c3[col]
 
     cols_nom = ['Microárea', 'Nome', 'CPF', 'Telefone celular', 'Risco gestacional', 
                 'Prática A', 'Prática B', 'Prática C', 'Prática D', 'Prática E', 'Prática F', 
                 'Prática G', 'Prática H', 'Prática I', 'Prática J', 'Prática K', 'Score_C3_%']
+    
+    for c in cols_nom:
+        if c not in df.columns: df[c] = "-"
+        
     df_nom = df[cols_nom].copy()
 
     df_micro = df.groupby('Microárea').agg(
